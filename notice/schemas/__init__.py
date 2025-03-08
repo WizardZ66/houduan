@@ -1,0 +1,1 @@
+from .Bulletin_pydantic import Bulletin,BulletinBase,BulletinCreate,BulletinUpdate,BaseModel

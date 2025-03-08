@@ -1,0 +1,79 @@
+import mimetypes
+import os
+
+from conda_env.env import unique
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File,status
+from multipart import file_path
+from sqlalchemy.orm import Session
+from fastapi.responses import StreamingResponse
+from notice.config import UPLOAD_DIR, PORT, HOST
+from notice.models.notices import Bulletin_Base
+from notice.services import save_uploaded_file, create_filename
+from notice.services.service import get_db, delete_associated_file, validate_file_type
+
+router = APIRouter()
+
+
+# 上传公告（支持文件上传）
+@router.post("/upload_bulletin/")
+async def create_bulletin(
+        title: str,
+        file: UploadFile = File(None),
+        db: Session = Depends(get_db)
+):
+    # 验证文件类型是否为 TXT
+    if not validate_file_type(file, ['text/plain']):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="仅支持上传 TXT 文件"
+        )
+    #生成保存文件路径，文件名
+    unique_filename=create_filename(file, title)
+    file_path=save_uploaded_file(unique_filename, file)
+
+    #生成显示公告url
+    download_url = f"http://{HOST}:{PORT}/notices/show_bulletin?file_path={file_path}"
+    #公告信息存入数据库
+    db_bulletin = Bulletin_Base(unique_filename=unique_filename, file_path=file_path,file_show_url=download_url)
+    db.add(db_bulletin)
+    db.commit()
+    db.refresh(db_bulletin)
+    return {"获取公告url":download_url,"唯一文件名":db_bulletin.unique_filename}
+
+
+# 公告传输
+@router.get("/show_bulletin/")
+def show_notice(file_path: str):
+
+    # 检查文件是否存在
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    # 获取文件的 MIME 类型
+    mime_type, _ = mimetypes.guess_type(file_path)
+
+    # 打开文件并创建 StreamingResponse
+    file_like = open(file_path, 'rb')
+
+    # 设置正确的 MIME 类型为 text/plain，确保浏览器以纯文本显示
+    response = StreamingResponse(
+        file_like,
+        media_type="text/plain",
+    )
+    # 不设置 Content-Disposition，避免触发下载
+    return response
+
+
+# 删除公告（同时删除关联文件）
+@router.delete("/delete_bulletin/")
+def delete_bulletin(unique_filename:str,db: Session = Depends(get_db)):
+    db_bulletin = db.query(Bulletin_Base).filter(Bulletin_Base.unique_filename == unique_filename).first()
+    if db_bulletin is None:
+        raise HTTPException(status_code=404, detail="公告不存在")
+
+    # 删除关联文件
+    delete_associated_file(db_bulletin.file_path)
+    #删除公告
+    db.delete(db_bulletin)
+    db.commit()
+    return {"message": "公告已删除"}
